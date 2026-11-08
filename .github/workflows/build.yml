@@ -15,8 +15,46 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.9" }
+      - name: Ensure Gradle Wrapper Executable
+        run: chmod +x ./gradlew 2>/dev/null || true
+      - name: Accept Android SDK Licenses
+        run: yes | sdkmanager --licenses 2>/dev/null || true
+      - name: Prepare google-services.json
+        env:
+          GS_B64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          GS_RAW: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, re, sys
+          raw = (os.environ.get("GS_B64") or os.environ.get("GS_RAW") or "").strip()
+          existing_gs = next((p for p in (pathlib.Path("google-services.json"), pathlib.Path("backup-app/google-services.json"), pathlib.Path("viewer-app/google-services.json")) if p.is_file()), None)
+          if raw:
+              content = raw.encode("utf-8") if raw.startswith("{") else base64.b64decode("".join(raw.split()))
+          elif existing_gs is not None:
+              content = existing_gs.read_bytes()
+          else:
+              applet_cfg_path = pathlib.Path("firebase-applet-config.json")
+              if applet_cfg_path.exists():
+                  cfg = json.loads(applet_cfg_path.read_text(encoding="utf-8"))
+                  proj = cfg.get("projectId", "demo-backup")
+                  api_k = cfg.get("apiKey", "")
+                  num = str(cfg.get("messagingSenderId") or "123456789012")
+                  bkt = cfg.get("storageBucket") or f"{proj}.appspot.com"
+                  oauth_id = cfg.get("oAuthClientId") or ""
+                  m = re.search(r":([0-9a-fA-F]{8,})$", cfg.get("appId") or "")
+                  tail = (m.group(1).lower() if m else "9a6d13baf4427440")
+                  def mk_cl(pkg, idx):
+                      oa = [{"client_id": oauth_id, "client_type": 3}] if oauth_id else []
+                      return {"client_info": {"mobilesdk_app_id": f"1:{num}:android:{tail[:14]}{idx:02x}", "android_client_info": {"package_name": pkg}}, "oauth_client": oa, "api_key": [{"current_key": api_k}], "services": {"appinvite_service": {"other_platform_oauth_client": oa}}}
+                  content = json.dumps({"project_info": {"project_number": num, "project_id": proj, "storage_bucket": bkt}, "client": [mk_cl("app.backup.source", 1), mk_cl("app.backup.viewer", 2)], "configuration_version": "1"}, indent=2).encode("utf-8")
+              else:
+                  content = b"{}"
+          for target in ("backup-app/google-services.json", "viewer-app/google-services.json"):
+              pathlib.Path(target).parent.mkdir(parents=True, exist_ok=True)
+              pathlib.Path(target).write_bytes(content)
+          PY
       - name: Unit tests
-        run: gradle --no-daemon :core:testDebugUnitTest :backup-app:testDebugUnitTest :viewer-app:testDebugUnitTest
+        run: ./gradlew :core:testDebugUnitTest :backup-app:testDebugUnitTest :viewer-app:testDebugUnitTest --no-daemon --continue
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -153,7 +191,7 @@ jobs:
           print("اكتمل تجهيز google-services.json بنجاح للحزمتين app.backup.source و app.backup.viewer.")
           PY
       - name: Assemble APKs
-        run: gradle --no-daemon :backup-app:assembleDebug :viewer-app:assembleDebug
+        run: ./gradlew :backup-app:assembleDebug :viewer-app:assembleDebug --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: backup-app-apk
